@@ -31,9 +31,9 @@ func (r *PostgresRepository) TenantExists(ctx context.Context, tenantID uuid.UUI
 
 func (r *PostgresRepository) CreateUser(ctx context.Context, tenantID uuid.UUID, email, passwordHash string) (*User, error) {
 	query := `
-		INSERT INTO users (tenant_id, email, password_hash, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'ACTIVE', NOW(), NOW())
-		RETURNING user_id, tenant_id, email, status, created_at, updated_at
+		INSERT INTO users (tenant_id, email, password_hash, status, token_version, created_at, updated_at)
+		VALUES ($1, $2, $3, 'PENDING_VERIFICATION', 1, NOW(), NOW())
+		RETURNING user_id, tenant_id, email, status, token_version, created_at, updated_at
 	`
 	user := &User{}
 	err := r.pool.QueryRow(ctx, query, tenantID, email, passwordHash).Scan(
@@ -41,6 +41,7 @@ func (r *PostgresRepository) CreateUser(ctx context.Context, tenantID uuid.UUID,
 		&user.TenantID,
 		&user.Email,
 		&user.Status,
+		&user.TokenVersion,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -58,9 +59,9 @@ func (r *PostgresRepository) CreateUser(ctx context.Context, tenantID uuid.UUID,
 
 func (r *PostgresRepository) GetUserByEmail(ctx context.Context, tenantID uuid.UUID, email string) (*User, error) {
 	query := `
-		SELECT user_id, tenant_id, email, password_hash, status, created_at, updated_at
+		SELECT user_id, tenant_id, email, password_hash, status, token_version, created_at, updated_at
 		FROM users
-		WHERE tenant_id = $1 AND email = $2
+		WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)
 	`
 	user := &User{}
 	err := r.pool.QueryRow(ctx, query, tenantID, email).Scan(
@@ -69,6 +70,7 @@ func (r *PostgresRepository) GetUserByEmail(ctx context.Context, tenantID uuid.U
 		&user.Email,
 		&user.PasswordHash,
 		&user.Status,
+		&user.TokenVersion,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -81,6 +83,47 @@ func (r *PostgresRepository) GetUserByEmail(ctx context.Context, tenantID uuid.U
 	}
 
 	return user, nil
+}
+
+func (r *PostgresRepository) VerifyUserEmail(ctx context.Context, tenantID uuid.UUID, email string) error {
+	query := `
+		UPDATE users 
+		SET status = 'ACTIVE', updated_at = NOW() 
+		WHERE tenant_id = $1 AND LOWER(email) = LOWER($2) AND status = 'PENDING_VERIFICATION'
+	`
+	cmdTag, err := r.pool.Exec(ctx, query, tenantID, email)
+	if err != nil {
+		return fmt.Errorf("postgres: failed to verify email: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return errors.New("user not in pending verification state or not found")
+	}
+	return nil
+}
+
+func (r *PostgresRepository) UpdateUserPassword(ctx context.Context, tenantID uuid.UUID, email, newPasswordHash string) error {
+	query := `
+		UPDATE users 
+		SET password_hash = $1, token_version = token_version + 1, updated_at = NOW() 
+		WHERE tenant_id = $2 AND LOWER(email) = LOWER($3)
+	`
+	cmdTag, err := r.pool.Exec(ctx, query, newPasswordHash, tenantID, email)
+	if err != nil {
+		return fmt.Errorf("postgres: failed to update password: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) RevokeAllUserTokens(ctx context.Context, tenantID, userID uuid.UUID) error {
+	query := `UPDATE refresh_tokens SET is_revoked = TRUE WHERE tenant_id = $1 AND user_id = $2`
+	_, err := r.pool.Exec(ctx, query, tenantID, userID)
+	if err != nil {
+		return fmt.Errorf("postgres: failed to revoke user tokens: %w", err)
+	}
+	return nil
 }
 
 func (r *PostgresRepository) GetUserRoles(ctx context.Context, tenantID, userID uuid.UUID) ([]string, error) {
@@ -134,7 +177,6 @@ func (r *PostgresRepository) AssignDefaultRole(ctx context.Context, tenantID, us
 	if err != nil {
 		return fmt.Errorf("postgres: failed to link user to role: %w", err)
 	}
-
 	return tx.Commit(ctx)
 }
 

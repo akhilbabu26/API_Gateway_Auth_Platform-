@@ -21,6 +21,25 @@ type RegisterRequest struct {
 	Password string `json:"password"`
 }
 
+type VerifyEmailRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+type ResendVerificationRequest struct {
+	Email string `json:"email"`
+}
+
+type ForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+type ResetPasswordRequest struct {
+	Email       string `json:"email"`
+	Code        string `json:"code"`
+	NewPassword string `json:"new_password"`
+}
+
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
@@ -32,6 +51,10 @@ type RefreshRequest struct {
 
 type LogoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
+}
+
+type GenericResponse struct {
+	Message string `json:"message"`
 }
 
 type ErrorResponse struct {
@@ -92,7 +115,95 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, user)
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"user":    user,
+		"message": "verification code sent to your email",
+	})
+}
+
+func (h *Handler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := extractTenantID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var req VerifyEmailRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "invalid request: email and code required")
+		return
+	}
+
+	tokenPair, err := h.service.VerifyEmail(r.Context(), tenantID, req.Email, req.Code)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, tokenPair)
+}
+
+func (h *Handler) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := extractTenantID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var req ResendVerificationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+
+	if err := h.service.ResendVerificationCode(r.Context(), tenantID, req.Email); err != nil {
+		if errors.Is(err, ErrAlreadyVerified) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to resend verification code")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, GenericResponse{Message: "if the account exists and is unverified, a new code has been sent"})
+}
+
+func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := extractTenantID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, http.StatusBadRequest, "email is required")
+		return
+	}
+
+	_ = h.service.ForgotPassword(r.Context(), tenantID, req.Email)
+	writeJSON(w, http.StatusOK, GenericResponse{Message: "if an active account exists with that email, a password reset code has been sent"})
+}
+
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	tenantID, err := extractTenantID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var req ResetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Code == "" || req.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "email, code, and new_password are required")
+		return
+	}
+
+	if err := h.service.ResetPassword(r.Context(), tenantID, req.Email, req.Code, req.NewPassword); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, GenericResponse{Message: "password reset successfully; all active sessions revoked"})
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +221,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	tokenPair, err := h.service.Login(r.Context(), tenantID, req.Email, req.Password)
 	if err != nil {
+		if errors.Is(err, ErrUnverifiedAccount) {
+			writeError(w, http.StatusForbidden, "account pending verification: please verify your email first")
+			return
+		}
 		if errors.Is(err, ErrInvalidCredentials) {
 			writeError(w, http.StatusUnauthorized, "invalid email or password")
 			return

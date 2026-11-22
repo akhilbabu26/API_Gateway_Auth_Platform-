@@ -1,6 +1,8 @@
--- Multi-Tenant Auth Schema Migration
+-- +goose Up
+-- +goose StatementBegin
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
+-- 1. Tenants table
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(100) NOT NULL,
@@ -8,6 +10,12 @@ CREATE TABLE IF NOT EXISTS tenants (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Seed default tenant directly into tenants table
+INSERT INTO tenants (tenant_id, name, status)
+VALUES ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'Default Tenant', 'ACTIVE')
+ON CONFLICT (tenant_id) DO NOTHING;
+
+-- 2. Users table (scoped by tenant_id)
 CREATE TABLE IF NOT EXISTS users (
     user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -19,6 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT uq_tenant_user_email UNIQUE (tenant_id, email)
 );
 
+-- 3. Roles and User Roles
 CREATE TABLE IF NOT EXISTS roles (
     role_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -32,6 +41,7 @@ CREATE TABLE IF NOT EXISTS user_roles (
     PRIMARY KEY (user_id, role_id)
 );
 
+-- 4. Refresh Tokens table (with Family Lineage for Replay Detection)
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     token_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
@@ -45,3 +55,13 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id);
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS tenants;
+-- +goose StatementEnd
