@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
-	"math"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,6 +18,7 @@ import (
 	"platform/hasher"
 	"platform/jwt"
 	"platform/postgres"
+	redisclient "platform/redis"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -38,7 +39,11 @@ func main() {
 		}
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -69,7 +74,7 @@ func main() {
 	log.Println("Database migrations executed successfully (Goose UP).")
 
 	// 4. Connect to Redis (Fatal if unavailable - OTP and token tracking depend on Redis)
-	rdb, err := redis.NewClient(cfg.RedisURL)
+	rdb, err := redisclient.NewClient(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("Fatal: Redis connection failed on %s: %v\n", cfg.RedisURL, err)
 	}
@@ -90,20 +95,23 @@ func main() {
 	// 6. Router & Middleware Stack
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(internal.CORS(cfg.AllowedOrigins))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	r.Get("/healthz", healthHandler.Liveness)
+	r.Get("/readyz", healthHandler.Readiness)
 
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/register", handler.Register)
-		r.Post("/login", handler.Login)
-		r.Post("/refresh", handler.Refresh)
-		r.Post("/logout", handler.Logout)
+		r.Post("/register", authHandler.Register)
+		r.Post("/verify-email", authHandler.VerifyEmail)
+		r.Post("/resend-verification", authHandler.ResendVerification)
+		r.Post("/forgot-password", authHandler.ForgotPassword)
+		r.Post("/reset-password", authHandler.ResetPassword)
+		r.Post("/login", authHandler.Login)
+		r.Post("/refresh", authHandler.Refresh)
+		r.Post("/logout", authHandler.Logout)
 	})
 
 	// 7. Explicit Bind on 0.0.0.0 for Containers & Cloud Instances
@@ -115,17 +123,23 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Auth Service listening on %s (Allowed CORS: %v)...\n", server.Addr, cfg.AllowedOrigins)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v\n", err)
+			serverErr <- err
 		}
 	}()
 
 	// 8. Graceful OS Signal Handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	select {
+	case sig := <-stop:
+		log.Printf("Received shutdown signal %s", sig)
+	case err := <-serverErr:
+		log.Fatalf("Server error: %v", err)
+	}
 
 	log.Println("Shutting down auth server gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -135,35 +149,4 @@ func main() {
 		log.Fatalf("Server shutdown failed: %v\n", err)
 	}
 	log.Println("Auth server stopped cleanly.")
-}
-
-func rateLimit(limiter *ratelimit.Redis, limit int, window time.Duration, route string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				clientIP = r.RemoteAddr
-			}
-			allowed, remaining, retryAfter, err := limiter.Allow(r.Context(), fmt.Sprintf("auth:ratelimit:%s:%s", route, clientIP), limit, window)
-			if err != nil {
-				// Match the documented platform policy: Redis outages do not block auth traffic.
-				log.Printf("rate limiter unavailable for %s: %v", route, err)
-				next.ServeHTTP(w, r)
-				return
-			}
-			w.Header().Set("X-RateLimit-Limit", fmt.Sprint(limit))
-			w.Header().Set("X-RateLimit-Remaining", fmt.Sprint(remaining))
-			if !allowed {
-				seconds := int(math.Ceil(retryAfter.Seconds()))
-				if seconds < 1 {
-					seconds = 1
-				}
-				w.Header().Set("Retry-After", fmt.Sprint(seconds))
-				w.Header().Set("Content-Type", "application/json")
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }
