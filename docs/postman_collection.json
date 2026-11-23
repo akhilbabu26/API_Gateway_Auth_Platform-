@@ -1,0 +1,420 @@
+{
+	"info": {
+		"_postman_id": "a1b2c3d4-e5f6-47a8-b9c0-123456789abc",
+		"name": "API Gateway - Auth Service (TradeDrift OTP)",
+		"description": "Production-grade multi-tenant Auth Service testing suite featuring TradeDrift OTP Architecture (Redis, LogMailer, Email Verification, Password Reset, Argon2id, and Refresh Token Rotation).",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "1. Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/healthz",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"healthz"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "2. Register User (Triggers OTP)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 201 Created\", function () {",
+							"    pm.response.to.have.status(201);",
+							"});",
+							"pm.test(\"User in PENDING_VERIFICATION state\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.expect(jsonData.user.status).to.eql(\"PENDING_VERIFICATION\");",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\",\n  \"password\": \"Password123!\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/register",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"register"
+					]
+				},
+				"description": "Registers user with PENDING_VERIFICATION status and logs 6-digit OTP to server console."
+			},
+			"response": []
+		},
+		{
+			"name": "3. Verify Email (Submits OTP)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200 OK\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test(\"Tokens issued on successful verification\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.expect(jsonData).to.have.property('access_token');",
+							"    pm.expect(jsonData).to.have.property('refresh_token');",
+							"    pm.collectionVariables.set(\"access_token\", jsonData.access_token);",
+							"    pm.collectionVariables.set(\"refresh_token\", jsonData.refresh_token);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\",\n  \"code\": \"123456\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/verify-email",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"verify-email"
+					]
+				},
+				"description": "Submits 6-digit OTP from server logs. Activates account and returns Access & Refresh tokens."
+			},
+			"response": []
+		},
+		{
+			"name": "4. Resend Verification Code",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/resend-verification",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"resend-verification"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "5. Login (Verified Users Only)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200 OK\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test(\"Tokens saved\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.collectionVariables.set(\"access_token\", jsonData.access_token);",
+							"    pm.collectionVariables.set(\"refresh_token\", jsonData.refresh_token);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\",\n  \"password\": \"Password123!\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/login",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"login"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "6. Forgot Password (Requests Reset OTP)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/forgot-password",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"forgot-password"
+					]
+				},
+				"description": "Generates 6-digit reset OTP and logs it to server console with security@apigateway.com."
+			},
+			"response": []
+		},
+		{
+			"name": "7. Reset Password (Submits OTP & New Password)",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"akhil@example.com\",\n  \"code\": \"123456\",\n  \"new_password\": \"NewPassword123!\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/reset-password",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"reset-password"
+					]
+				},
+				"description": "Verifies OTP, hashes new password with Argon2id, bumps token_version, and revokes all active sessions."
+			},
+			"response": []
+		},
+		{
+			"name": "8. Refresh Token (Normal Rotation)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 200 OK\", function () {",
+							"    pm.response.to.have.status(200);",
+							"});",
+							"pm.test(\"Rotated tokens issued\", function () {",
+							"    var jsonData = pm.response.json();",
+							"    pm.collectionVariables.set(\"used_refresh_token\", pm.collectionVariables.get(\"refresh_token\"));",
+							"    pm.collectionVariables.set(\"access_token\", jsonData.access_token);",
+							"    pm.collectionVariables.set(\"refresh_token\", jsonData.refresh_token);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/refresh",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"refresh"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "9. Security Replay Test (Reusing Old Token)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test(\"Status code is 401 Unauthorized\", function () {",
+							"    pm.response.to.have.status(401);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-Tenant-ID",
+						"value": "{{tenant_id}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"refresh_token\": \"{{used_refresh_token}}\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/refresh",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"refresh"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "10. Logout",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/auth/logout",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"auth",
+						"logout"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8081",
+			"type": "string"
+		},
+		{
+			"key": "tenant_id",
+			"value": "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+			"type": "string"
+		},
+		{
+			"key": "access_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "refresh_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "used_refresh_token",
+			"value": "",
+			"type": "string"
+		}
+	]
+}

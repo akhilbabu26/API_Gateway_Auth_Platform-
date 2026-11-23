@@ -12,7 +12,8 @@ type User struct {
 	TenantID     uuid.UUID `json:"tenant_id"`
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"-"`
-	Status       string    `json:"status"`
+	Status       string    `json:"status"` // PENDING_VERIFICATION, ACTIVE, SUSPENDED
+	TokenVersion int       `json:"token_version"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

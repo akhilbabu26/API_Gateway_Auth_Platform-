@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"math"
 	"net"
@@ -13,68 +12,87 @@ import (
 	"time"
 
 	"auth/internal"
+	"auth/internal/mail"
+	"auth/internal/otp"
+	"platform/config"
 	"platform/hasher"
 	"platform/jwt"
 	"platform/postgres"
-	"platform/ratelimit"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
 func main() {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://postgres:postgrespassword@localhost:5432/apigateway?sslmode=disable"
+	// Parse CLI flags (used by Docker healthcheck without curl/wget dependencies)
+	healthCheckFlag := flag.Bool("healthcheck", false, "Query the local healthcheck endpoint and exit")
+	flag.Parse()
+
+	if *healthCheckFlag {
+		port := os.Getenv("AUTH_PORT")
+		if port == "" {
+			port = os.Getenv("PORT")
+		}
+		if port == "" {
+			port = "8081"
+		}
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if jwtSecret == "" {
-		jwtSecret = "super-secret-production-grade-hmac-key-256bit"
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// 1. Connection Pool via platform/postgres
-	pool, err := postgres.NewPool(ctx, dbURL)
+	// 1. Load and Validate Configuration (Fails fast if production secrets/CORS are invalid)
+	cfg, err := config.LoadAndValidateConfig()
 	if err != nil {
-		log.Printf("Notice: DB connection pending (start Postgres container): %v\n", err)
-	} else {
-		defer pool.Close()
-		log.Println("Connected to PostgreSQL successfully.")
+		log.Fatalf("Fatal configuration error: %v\n", err)
 	}
+	log.Printf("Starting Auth Service in [%s] mode on port %s...\n", cfg.AppEnv, cfg.Port)
 
-	// 2. Initialize Shared Platform & Service Modules
-	var repo internal.Repository
-	if pool != nil {
-		repo = internal.NewPostgresRepository(pool)
+	// 2. Connect to PostgreSQL (Fatal if unavailable - ensures readiness before accepting traffic)
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+
+	pool, err := postgres.NewPool(dbCtx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Fatal: PostgreSQL connection failed: %v\n", err)
 	}
+	defer pool.Close()
+	log.Println("Connected to PostgreSQL successfully.")
+
+	// 3. Run Database Migrations (Fatal if migrations fail)
+	if err := internal.RunMigrations(cfg.DatabaseURL); err != nil {
+		log.Fatalf("Fatal: Database migration failed: %v\n", err)
+	}
+	log.Println("Database migrations executed successfully (Goose UP).")
+
+	// 4. Connect to Redis (Fatal if unavailable - OTP and token tracking depend on Redis)
+	rdb, err := redis.NewClient(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("Fatal: Redis connection failed on %s: %v\n", cfg.RedisURL, err)
+	}
+	defer rdb.Close()
+	log.Println("Connected to Redis successfully.")
+
+	// 5. Initialize Components
+	repo := internal.NewPostgresRepository(pool)
 	passHasher := hasher.NewPasswordHasher(nil)
-	tokenMgr := jwt.NewTokenManager(jwtSecret, "apigateway-auth-service", 15*time.Minute, 7*24*time.Hour)
-	authSvc := internal.NewService(repo, passHasher, tokenMgr)
-	handler := internal.NewHandler(authSvc)
+	tokenMgr := jwt.NewTokenManager(cfg.JWTSecret, cfg.JWTIssuer, 15*time.Minute, 7*24*time.Hour)
+	otpMgr := otp.NewManager(rdb, 5*time.Minute)
+	mailer := mail.NewLogMailer()
 
-	// 3. Routing
+	authSvc := internal.NewService(repo, passHasher, tokenMgr, otpMgr, mailer)
+	authHandler := internal.NewHandler(authSvc)
+	healthHandler := internal.NewHealthHandler(pool, rdb, cfg.AppEnv)
+
+	// 6. Router & Middleware Stack
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
-
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		redisURL = "redis://localhost:6379/0"
-	}
-	limiter, err := ratelimit.NewRedis(redisURL, 250*time.Millisecond)
-	if err != nil {
-		log.Fatalf("Invalid REDIS_URL: %v", err)
-	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -82,14 +100,15 @@ func main() {
 	})
 
 	r.Route("/auth", func(r chi.Router) {
-		r.With(rateLimit(limiter, 5, time.Minute, "register")).Post("/register", handler.Register)
-		r.With(rateLimit(limiter, 10, time.Minute, "login")).Post("/login", handler.Login)
-		r.With(rateLimit(limiter, 30, time.Minute, "refresh")).Post("/refresh", handler.Refresh)
-		r.With(rateLimit(limiter, 30, time.Minute, "logout")).Post("/logout", handler.Logout)
+		r.Post("/register", handler.Register)
+		r.Post("/login", handler.Login)
+		r.Post("/refresh", handler.Refresh)
+		r.Post("/logout", handler.Logout)
 	})
 
+	// 7. Explicit Bind on 0.0.0.0 for Containers & Cloud Instances
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         "0.0.0.0:" + cfg.Port,
 		Handler:      r,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -97,12 +116,13 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Auth Service (TradeDrift Pattern) listening on port %s...\n", port)
+		log.Printf("Auth Service listening on %s (Allowed CORS: %v)...\n", server.Addr, cfg.AllowedOrigins)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v\n", err)
 		}
 	}()
 
+	// 8. Graceful OS Signal Handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -112,7 +132,7 @@ func main() {
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Shutdown failed: %v\n", err)
+		log.Fatalf("Server shutdown failed: %v\n", err)
 	}
 	log.Println("Auth server stopped cleanly.")
 }

@@ -22,6 +22,12 @@ type Repository interface {
 	GetUserRoles(ctx context.Context, tenantID, userID uuid.UUID) ([]string, error)
 	AssignDefaultRole(ctx context.Context, tenantID, userID uuid.UUID, roleName string) error
 
+	// Verification & Password Reset
+	VerifyUserEmail(ctx context.Context, tenantID uuid.UUID, email string) error
+	UpdateUserPassword(ctx context.Context, tenantID uuid.UUID, email, newPasswordHash string) error
+	RevokeAllUserTokens(ctx context.Context, tenantID, userID uuid.UUID) error
+
+	// Refresh Tokens
 	CreateRefreshToken(ctx context.Context, token *RefreshToken) error
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, tokenID uuid.UUID) error
