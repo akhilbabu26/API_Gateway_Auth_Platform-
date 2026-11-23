@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +16,7 @@ import (
 	"platform/hasher"
 	"platform/jwt"
 	"platform/postgres"
+	"platform/ratelimit"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -59,10 +63,18 @@ func main() {
 	// 3. Routing
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "redis://localhost:6379/0"
+	}
+	limiter, err := ratelimit.NewRedis(redisURL, 250*time.Millisecond)
+	if err != nil {
+		log.Fatalf("Invalid REDIS_URL: %v", err)
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -70,10 +82,10 @@ func main() {
 	})
 
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/register", handler.Register)
-		r.Post("/login", handler.Login)
-		r.Post("/refresh", handler.Refresh)
-		r.Post("/logout", handler.Logout)
+		r.With(rateLimit(limiter, 5, time.Minute, "register")).Post("/register", handler.Register)
+		r.With(rateLimit(limiter, 10, time.Minute, "login")).Post("/login", handler.Login)
+		r.With(rateLimit(limiter, 30, time.Minute, "refresh")).Post("/refresh", handler.Refresh)
+		r.With(rateLimit(limiter, 30, time.Minute, "logout")).Post("/logout", handler.Logout)
 	})
 
 	server := &http.Server{
@@ -103,4 +115,35 @@ func main() {
 		log.Fatalf("Shutdown failed: %v\n", err)
 	}
 	log.Println("Auth server stopped cleanly.")
+}
+
+func rateLimit(limiter *ratelimit.Redis, limit int, window time.Duration, route string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				clientIP = r.RemoteAddr
+			}
+			allowed, remaining, retryAfter, err := limiter.Allow(r.Context(), fmt.Sprintf("auth:ratelimit:%s:%s", route, clientIP), limit, window)
+			if err != nil {
+				// Match the documented platform policy: Redis outages do not block auth traffic.
+				log.Printf("rate limiter unavailable for %s: %v", route, err)
+				next.ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("X-RateLimit-Limit", fmt.Sprint(limit))
+			w.Header().Set("X-RateLimit-Remaining", fmt.Sprint(remaining))
+			if !allowed {
+				seconds := int(math.Ceil(retryAfter.Seconds()))
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", fmt.Sprint(seconds))
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
