@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // AppConfig holds validated application runtime configuration.
@@ -21,6 +23,20 @@ type AppConfig struct {
 	PostgresDB     string
 }
 
+// RateLimitConfig is shared by gateway processes and is intentionally independent of auth settings.
+type RateLimitConfig struct {
+	Enabled           bool
+	Algorithm         string
+	GlobalLimit       int
+	GlobalWindow      time.Duration
+	LoginLimit        int
+	RegistrationLimit int
+	RefreshLimit      int
+	FailMode          string
+	TrustedProxies    []string
+	KeySecret         string
+}
+
 // LoadAndValidateConfig loads environment variables and strictly validates critical secrets and CORS.
 func LoadAndValidateConfig() (*AppConfig, error) {
 	// Auto-load .env files if present (service dir or workspace root)
@@ -31,7 +47,6 @@ func LoadAndValidateConfig() (*AppConfig, error) {
 
 // ValidateConfigFromEnv validates the current environment configuration without re-reading .env files.
 func ValidateConfigFromEnv() (*AppConfig, error) {
-
 	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
 	if appEnv == "" {
 		appEnv = "development"
@@ -184,4 +199,68 @@ func ValidateConfigFromEnv() (*AppConfig, error) {
 		PostgresUser:   pgUser,
 		PostgresDB:     pgDB,
 	}, nil
+}
+
+// LoadRateLimitConfigFromEnv reads gateway rate-limit settings independently from auth configuration.
+func LoadRateLimitConfigFromEnv() (RateLimitConfig, error) {
+	config := RateLimitConfig{
+		Enabled:           true,
+		Algorithm:         "sliding_window",
+		GlobalLimit:       100,
+		GlobalWindow:      time.Minute,
+		LoginLimit:        10,
+		RegistrationLimit: 5,
+		RefreshLimit:      20,
+		FailMode:          "closed",
+		KeySecret:         strings.TrimSpace(os.Getenv("RATE_LIMIT_KEY_SECRET")),
+	}
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_ENABLED")); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return config, fmt.Errorf("config: invalid RATE_LIMIT_ENABLED: %w", err)
+		}
+		config.Enabled = value
+	}
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_ALGORITHM")); raw != "" {
+		config.Algorithm = strings.ToLower(raw)
+	}
+	if config.Algorithm != "sliding_window" {
+		return config, fmt.Errorf("config: RATE_LIMIT_ALGORITHM must be sliding_window")
+	}
+	for _, item := range []struct {
+		name string
+		dest *int
+	}{{"RATE_LIMIT_GLOBAL_LIMIT", &config.GlobalLimit}, {"RATE_LIMIT_LOGIN_LIMIT", &config.LoginLimit}, {"RATE_LIMIT_REGISTER_LIMIT", &config.RegistrationLimit}, {"RATE_LIMIT_REFRESH_LIMIT", &config.RefreshLimit}} {
+		if raw := strings.TrimSpace(os.Getenv(item.name)); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 1 {
+				return config, fmt.Errorf("config: %s must be a positive integer", item.name)
+			}
+			*item.dest = value
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_WINDOW")); raw != "" {
+		window, err := time.ParseDuration(raw)
+		if err != nil || window < time.Millisecond {
+			return config, fmt.Errorf("config: RATE_LIMIT_WINDOW must be at least 1ms")
+		}
+		config.GlobalWindow = window
+	}
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_FAIL_MODE")); raw != "" {
+		config.FailMode = strings.ToLower(raw)
+	}
+	if config.FailMode != "open" && config.FailMode != "closed" {
+		return config, fmt.Errorf("config: RATE_LIMIT_FAIL_MODE must be open or closed")
+	}
+	if raw := strings.TrimSpace(os.Getenv("RATE_LIMIT_TRUSTED_PROXIES")); raw != "" {
+		for _, proxy := range strings.Split(raw, ",") {
+			if proxy = strings.TrimSpace(proxy); proxy != "" {
+				config.TrustedProxies = append(config.TrustedProxies, proxy)
+			}
+		}
+	}
+	if config.Enabled && len(config.KeySecret) < 32 {
+		return config, fmt.Errorf("config: RATE_LIMIT_KEY_SECRET must be at least 32 characters when rate limiting is enabled")
+	}
+	return config, nil
 }

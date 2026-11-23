@@ -37,6 +37,9 @@ services:
     environment:
       APP_ENV: production
       AUTH_PORT: ${AUTH_PORT:-8081}
+      POSTGRES_USER: ${POSTGRES_USER:?error POSTGRES_USER required in production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?error POSTGRES_PASSWORD required in production}
+      POSTGRES_DB: ${POSTGRES_DB:?error POSTGRES_DB required in production}
       DATABASE_URL: postgres://${POSTGRES_USER:?error POSTGRES_USER required in production}:${POSTGRES_PASSWORD:?error POSTGRES_PASSWORD required in production}@postgres:5432/${POSTGRES_DB:?error POSTGRES_DB required in production}?sslmode=${POSTGRES_SSLMODE:-disable}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?error JWT_SECRET required in production}
