@@ -1,5 +1,5 @@
--- SQL Migration for Multi-Tenant Auth Service
-
+-- +goose Up
+-- +goose StatementBegin
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- 1. Tenants table
@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS tenants (
     status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Seed default tenant directly into tenants table
+INSERT INTO tenants (tenant_id, name, status)
+VALUES ('a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'Default Tenant', 'ACTIVE')
+ON CONFLICT (tenant_id) DO NOTHING;
 
 -- 2. Users table (scoped by tenant_id)
 CREATE TABLE IF NOT EXISTS users (
@@ -50,3 +55,13 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_hash ON refresh_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id);
+-- +goose StatementEnd
+
+-- +goose Down
+-- +goose StatementBegin
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS user_roles;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS tenants;
+-- +goose StatementEnd
