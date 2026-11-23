@@ -18,7 +18,7 @@ import (
 	"platform/hasher"
 	"platform/jwt"
 	"platform/postgres"
-	"platform/redis"
+	redisclient "platform/redis"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -39,7 +39,11 @@ func main() {
 		}
 		client := &http.Client{Timeout: 3 * time.Second}
 		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s/healthz", port))
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -70,7 +74,7 @@ func main() {
 	log.Println("Database migrations executed successfully (Goose UP).")
 
 	// 4. Connect to Redis (Fatal if unavailable - OTP and token tracking depend on Redis)
-	rdb, err := redis.NewClient(cfg.RedisURL)
+	rdb, err := redisclient.NewClient(cfg.RedisURL)
 	if err != nil {
 		log.Fatalf("Fatal: Redis connection failed on %s: %v\n", cfg.RedisURL, err)
 	}
@@ -91,19 +95,14 @@ func main() {
 	// 6. Router & Middleware Stack
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(internal.CORS(cfg.AllowedOrigins))
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
-	r.Use(internal.CORS(cfg.AllowedOrigins))
 
-	// Liveness probe (Process is alive)
 	r.Get("/healthz", healthHandler.Liveness)
-
-	// Readiness probe (Backing databases and cache are connected and responsive)
 	r.Get("/readyz", healthHandler.Readiness)
 
-	// Auth API routes
 	r.Route("/auth", func(r chi.Router) {
 		r.Post("/register", authHandler.Register)
 		r.Post("/verify-email", authHandler.VerifyEmail)
@@ -124,17 +123,23 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Auth Service listening on %s (Allowed CORS: %v)...\n", server.Addr, cfg.AllowedOrigins)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server error: %v\n", err)
+			serverErr <- err
 		}
 	}()
 
 	// 8. Graceful OS Signal Handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-	<-stop
+	select {
+	case sig := <-stop:
+		log.Printf("Received shutdown signal %s", sig)
+	case err := <-serverErr:
+		log.Fatalf("Server error: %v", err)
+	}
 
 	log.Println("Shutting down auth server gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)

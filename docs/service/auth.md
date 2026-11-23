@@ -211,3 +211,16 @@ apigateway/
 │       ├── service.go           # High-level auth orchestration (Register, Login, Refresh)
 │       └── handler.go           # HTTP controllers for /auth/* endpoints
 ```
+
+## Auth Service Rate Limits
+
+The current auth HTTP service applies Redis-backed limits by client IP and endpoint:
+
+| Endpoint | Limit |
+|---|---:|
+| `POST /auth/register` | 5 requests per minute |
+| `POST /auth/login` | 10 requests per minute |
+| `POST /auth/refresh` | 30 requests per minute |
+| `POST /auth/logout` | 30 requests per minute |
+
+The counter update is atomic in Redis, so replicas sharing the same Redis database share a limit. A rejected request returns `429 Too Many Requests` with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` headers. Configure the connection with `REDIS_URL` (for example `redis://localhost:6379/0`). If Redis is unavailable, the auth service logs the limiter error and allows the request, following the documented fail-open policy. Limits use the socket peer IP; place the auth service behind a trusted gateway and keep it inaccessible to untrusted direct clients when relying on forwarded client addresses.
